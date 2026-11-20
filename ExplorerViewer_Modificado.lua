@@ -31,8 +31,8 @@ local UIS = game:GetService("UserInputService")
 local TextService = game:GetService("TextService")
 
 local GUI_NAME = "ExplorerViewerPanel"
-local MAX_NODES = 50000        -- limite de itens lidos por servico
-local MAX_DEPTH = 40           -- profundidade maxima da arvore
+local MAX_NODES = 5000000000000        -- limite de itens lidos por servico
+local MAX_DEPTH = 4000           -- profundidade maxima da arvore
 local ROW_H = 18               -- altura de cada linha
 local TEXT_SIZE = 13
 local MAX_LINE_CHARS = 400     -- corte VISUAL por linha (copiar/salvar leva tudo)
