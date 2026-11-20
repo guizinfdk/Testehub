@@ -1,7 +1,9 @@
 --[[
     Explorer Viewer v2 (standalone) - Roblox / Luau
 
-    - Painel arrastavel com um botao por servico (Workspace, ReplicatedStorage, etc).
+    - Menu compacto de serviços à direita; selecionar um serviço abre uma janela flutuante
+      independente com a árvore daquele serviço.
+    - Leitura completa da hierarquia acessível ao cliente, sem limite artificial de nós/profundidade.
     - Clique num servico -> arvore estilo Explorer: tudo fechado, clique na pasta
       pra abrir/fechar (▸ fechada, ▾ aberta). 📂 abre tudo, 📁 fecha tudo.
     - Linhas de Script / LocalScript / ModuleScript tem 🔍 e sao clicaveis:
@@ -31,8 +33,6 @@ local UIS = game:GetService("UserInputService")
 local TextService = game:GetService("TextService")
 
 local GUI_NAME = "ExplorerViewerPanel"
-local MAX_NODES = 5000000000000        -- limite de itens lidos por servico
-local MAX_DEPTH = 4000           -- profundidade maxima da arvore
 local ROW_H = 18               -- altura de cada linha
 local TEXT_SIZE = 13
 local MAX_LINE_CHARS = 400     -- corte VISUAL por linha (copiar/salvar leva tudo)
@@ -1436,9 +1436,10 @@ end
 -- Painel principal
 ---------------------------------------------------------------------
 local vp = getViewport()
-local W = math.min(460, vp.X - 16)
-local H = math.min(340, vp.Y - 16)
 local COMPACT_W = math.min(176, vp.X - 12)
+-- Reserva espaço para o seletor de serviços no lado direito, inclusive em celular.
+local W = math.min(460, math.max(160, vp.X - COMPACT_W - 24))
+local H = math.min(340, vp.Y - 16)
 
 local main = new("Frame", {
     Name = "Main", BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true,
@@ -1464,6 +1465,7 @@ new("TextLabel", {
 
 local closeBtn = headerButton(top, "✕", 36, Color3.fromRGB(90, 40, 50))
 local minBtn = headerButton(top, ">", 72)
+minBtn.Visible = false
 local saveBtn = headerButton(top, "💾", 108)
 
 local body = new("Frame", {
@@ -1483,11 +1485,37 @@ new("UIPadding", {
     PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
 }, side)
 
+-- Janela flutuante independente para a árvore do serviço selecionado.
+local treeWindow = new("Frame", {
+    Name = "ServiceTreeWindow", Visible = false, Active = true,
+    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+    Size = UDim2.fromOffset(W, H),
+    Position = UDim2.new(1, -W - COMPACT_W - 18, 0.5, -H / 2),
+    ClipsDescendants = true,
+}, gui)
+new("UICorner", {CornerRadius = UDim.new(0, 12)}, treeWindow)
+new("UIStroke", {Color = C.accent, Thickness = 1.5, Transparency = 0.3}, treeWindow)
+local treeTop = new("Frame", {
+    BackgroundColor3 = C.panel, BorderSizePixel = 0,
+    Size = UDim2.new(1, 0, 0, 34),
+}, treeWindow)
+local treeTitle = new("TextLabel", {
+    BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 0),
+    Size = UDim2.new(1, -112, 1, 0), Text = "🌳 Explorer • Serviço",
+    TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 13,
+    TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+}, treeTop)
+local treeMinBtn = headerButton(treeTop, " > ", 72)
+local treeCloseBtn = headerButton(treeTop, "✕", 36, Color3.fromRGB(90, 40, 50))
+local treeBody = new("Frame", {
+    BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 40),
+    Size = UDim2.new(1, -16, 1, -48),
+}, treeWindow)
+
 local outWrap = new("Frame", {
-    Visible = false,
-    BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(148, 4), Size = UDim2.new(1, -154, 1, -8),
-}, body)
+    Visible = true, BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(0, 0), Size = UDim2.fromScale(1, 1),
+}, treeBody)
 
 local status = new("TextLabel", {
     BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18),
@@ -1537,16 +1565,11 @@ local currentToken = 0
 local fullText = ""
 
 local function buildTree(serviceName, rootKids, setStat, token)
-    local rows = {}
-    local byInst = {}
+    local rows, byInst = {}, {}
     local count, scripts = 0, 0
-    local truncated, aborted = false, false
-
     local head = (SERVICE_ICONS[serviceName] or "🌐") .. " " .. serviceName
     rows[1] = { text = head, display = head, click = false, color = C.accent }
 
-    -- No da arvore. "lead" = prefixo + conector (│  ├─ └─), "label" = emoji + nome.
-    -- text = o que vai pro arquivo salvo; a tela desenha lead + seta + label.
     local function addNode(lead, label, inst, parentIdx, lname, isScript, hasKids)
         rows[#rows + 1] = {
             text = lead .. label, lead = lead, label = label, lname = lname,
@@ -1556,20 +1579,29 @@ local function buildTree(serviceName, rootKids, setStat, token)
         return #rows
     end
 
-    -- Linha so de aviso (vazio, limite...). Nao entra na pesquisa.
     local function addInfo(text, parentIdx)
         rows[#rows + 1] = { text = text, info = true, parent = parentIdx }
-        return #rows
     end
 
-    local function walk(kids, prefix, depth, parentIdx)
-        if aborted or truncated then return end
-        for i, child in ipairs(kids) do
-            if token ~= currentToken then aborted = true return end
-            if count >= MAX_NODES then truncated = true return end
+    if #rootKids == 0 then
+        addInfo("└─ (vazio ou inacessível pelo cliente)", 1)
+        return rows, count, scripts, byInst
+    end
 
+    -- DFS iterativo: sem limite artificial de quantidade ou profundidade.
+    -- Cada frame mantém a posição atual para preservar a ordem da árvore.
+    local stack = {{kids = rootKids, index = 1, prefix = "", parent = 1}}
+    while #stack > 0 do
+        if token ~= currentToken then return nil end
+        local frame = stack[#stack]
+        if frame.index > #frame.kids then
+            table.remove(stack)
+        else
+            local i = frame.index
+            frame.index = i + 1
+            local child = frame.kids[i]
             local grand = safeChildren(child)
-            local last = (i == #kids)
+            local last = (i == #frame.kids)
             local class = safeClass(child)
             local isScript = isScriptInstance(child)
             local extra = ""
@@ -1579,39 +1611,24 @@ local function buildTree(serviceName, rootKids, setStat, token)
 
             local cname = safeName(child)
             local label = iconFor(child) .. " " .. cname .. extra
-            local idx = addNode(prefix .. (last and "└─ " or "├─ "), label,
-                child, parentIdx, cname:lower(), isScript, #grand > 0)
+            local idx = addNode(frame.prefix .. (last and "└─ " or "├─ "), label,
+                child, frame.parent, cname:lower(), isScript, #grand > 0)
             byInst[child] = idx
-
             count = count + 1
+
+            if #grand > 0 then
+                local nextPrefix = frame.prefix .. (last and "   " or "│  ")
+                stack[#stack + 1] = {
+                    kids = grand, index = 1, prefix = nextPrefix, parent = idx
+                }
+            end
+
             if count % 250 == 0 then
                 setStat("⏳ Lendo... " .. count .. " itens")
                 task.wait()
             end
-
-            if #grand > 0 then
-                local nextPrefix = prefix .. (last and "   " or "│  ")
-                if depth >= MAX_DEPTH then
-                    addInfo(nextPrefix .. "└─ … (profundidade máxima)", idx)
-                else
-                    walk(grand, nextPrefix, depth + 1, idx)
-                end
-            end
         end
     end
-
-    if #rootKids == 0 then
-        addInfo("└─ (vazio ou inacessível pelo cliente)", 1)
-    else
-        walk(rootKids, "", 1, 1)
-    end
-
-    if truncated then
-        addInfo("", 1)
-        addInfo("⚠️ Limite de " .. MAX_NODES .. " itens atingido, o resto foi omitido.", 1)
-    end
-
-    if aborted then return nil end
     return rows, count, scripts, byInst
 end
 
@@ -1820,7 +1837,6 @@ end)
 local serviceButtons = {}
 local serviceLoaders = {}
 local serviceCache = {}
-local minimized = true
 local preloadComplete = false
 local preloadBusy = false
 local doReveal   -- definido mais abaixo
@@ -1837,11 +1853,10 @@ local function showService(serviceName, getRoot, revealInst)
     treeList.setRows({ plainRow("⏳ Carregando " .. serviceName .. "...", C.dim) })
     setStatus("⏳ Lendo...")
 
-    outWrap.Visible = true
-    side.Size = UDim2.new(0, 142, 1, 0)
-    main.Size = UDim2.fromOffset(W, H)
-    main.Position = UDim2.new(1, -W - 8, 0.5, -H / 2)
-    minBtn.Text = "<"
+    treeWindow.Visible = true
+    bringToFront(treeWindow)
+    treeWindow.Position = UDim2.new(1, -W - COMPACT_W - 18, 0.5, -H / 2)
+    treeTitle.Text = (SERVICE_ICONS[serviceName] or "🌐") .. " " .. serviceName
 
     task.spawn(function()
         local cached = serviceCache[serviceName]
@@ -1888,14 +1903,6 @@ local function addService(name, icon, getRoot)
     serviceButtons[name] = btn
     serviceLoaders[name] = getRoot
     btn.MouseButton1Click:Connect(function()
-        if minimized then
-            minimized = false
-            outWrap.Visible = true
-            side.Size = UDim2.new(0, 142, 1, 0)
-            main.Size = UDim2.fromOffset(W, H)
-            main.Position = UDim2.new(1, -W - 8, 0.5, -H / 2)
-            minBtn.Text = "<"
-        end
         showService(name, getRoot)
     end)
 end
@@ -2022,7 +2029,7 @@ doReveal = function(inst)
     local idx = allRows.byInst[inst]
     if not idx then
         touchePath = nil
-        setStatus("⚠️ " .. safeName(inst) .. " não está na árvore carregada (limite/profundidade)", C.bad)
+        setStatus("⚠️ " .. safeName(inst) .. " não está na árvore carregada (não está disponível nesta árvore)", C.bad)
         return
     end
     if searchTerm ~= "" then
@@ -2030,11 +2037,9 @@ doReveal = function(inst)
         searchBox.Text = ""
     end
     local p = allRows[idx].parent
-    local guard = 0
-    while p and p > 1 and guard < 200 do
+    while p and p > 1 do
         allRows[p].expanded = true
         p = allRows[p].parent
-        guard = guard + 1
     end
     updateView()
     local vis = treeList.getRows()
@@ -2303,25 +2308,36 @@ makeDrag(top,
         main.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
     end)
 
-treeList.scroll.InputBegan:Connect(function() bringToFront(main) end)
+treeList.scroll.InputBegan:Connect(function() bringToFront(treeWindow) end)
 
-minBtn.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    modal.Visible = false
-    if minimized then
-        outWrap.Visible = false
-        side.Size = UDim2.new(1, 0, 1, 0)
-        main.Size = UDim2.fromOffset(COMPACT_W, H)
-        main.Position = UDim2.new(1, -COMPACT_W - 8, 0.5, -H / 2)
-        minBtn.Text = ">"
+local treeCollapsed = false
+local treeExpandedSize = UDim2.fromOffset(W, H)
+treeMinBtn.MouseButton1Click:Connect(function()
+    treeCollapsed = not treeCollapsed
+    if treeCollapsed then
+        treeWindow.Size = UDim2.fromOffset(42, 74)
+        treeMinBtn.Position = UDim2.new(0, 6, 0.5, -12)
+        treeMinBtn.Text = "<"
+        treeTitle.Visible = false
+        treeBody.Visible = false
+        treeCloseBtn.Visible = false
     else
-        outWrap.Visible = curService ~= ""
-        side.Size = UDim2.new(0, 142, 1, 0)
-        main.Size = UDim2.fromOffset(W, H)
-        main.Position = UDim2.new(1, -W - 8, 0.5, -H / 2)
-        minBtn.Text = "<"
+        treeWindow.Size = treeExpandedSize
+        treeMinBtn.Position = UDim2.new(1, -72, 0.5, -12)
+        treeMinBtn.Text = ">"
+        treeTitle.Visible = true
+        treeBody.Visible = true
+        treeCloseBtn.Visible = true
     end
 end)
+treeCloseBtn.MouseButton1Click:Connect(function()
+    treeWindow.Visible = false
+end)
+makeDrag(treeTop,
+    function() bringToFront(treeWindow) return treeWindow.Position end,
+    function(d, sp)
+        treeWindow.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
+    end)
 
 closeBtn.MouseButton1Click:Connect(function()
     currentToken = currentToken + 1
